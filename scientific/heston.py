@@ -1,28 +1,28 @@
 from dataclasses import dataclass
-from math import *
-import cmath
 import numpy as np
+import cmath
+from math import log, pi, inf
 from scipy.integrate import quad
-from scipy.interpolate import interp1d
 from scipy.optimize import newton
+from scipy.interpolate import interp1d
+from utils import *
 
-from utils import implied_vol
-        
-# МОЛЕЛЬ ХЕСТОНА
+
+# Heston stochastic-volatility model
 @dataclass
 class Heston:
-    s0: float       
-    v0: float       
-    kappa: float     
-    theta: float
-    xi: float
-    rho: float
+    s0: float       # initial spot
+    v0: float       # initial variance
+    kappa: float    # mean-reversion speed
+    theta: float    # long-run variance
+    xi: float       # vol-of-vol
+    rho: float      # dW-dZ correlation
 
     def __post_init__(self):
-        # Векторизуем функцию вычисления цены опциона, чтобы применять ее к массивам страйков
+        # vectorize call price so it can be applied to strike arrays
         self.call_price = np.vectorize(self._call_price, excluded='self')
 
-    # Характеристическая функция логарифма цены акции в момент времени t
+    # characteristic function of log(S_t)
     def _cf(self, u: float | complex, t: float) -> complex:
         d = cmath.sqrt((1j*self.rho*self.xi*u - self.kappa)**2 + self.xi**2*(1j*u + u**2))
         g = ((1j*self.rho*self.xi*u - self.kappa + d) / (1j*self.rho*self.xi*u - self.kappa - d))
@@ -32,7 +32,7 @@ class Heston:
                                                                    (1-g*cmath.exp(-d*t)))
         return cmath.exp(C + D*self.v0)
 
-    # Цена опциона колл с исполнением в момент t и страйком k
+    # call price with maturity t and strike k via Carr-Madan integral
     def _call_price(self, t: float, k: float) -> float:
         def integrand(u):
             return (cmath.exp(1j*u*log(self.s0/k)) / (1j*u) *
@@ -40,32 +40,30 @@ class Heston:
         return self.s0 * ((1 - k/self.s0)/2 +
                           1/pi * quad(integrand, 0, inf, epsrel=1e-12, epsabs=1e-20)[0])
 
-    # Подразумеваемая волатильность
+    # Black-Scholes implied vol
     def implied_vol(self, t: float | np.ndarray, k: float | np.ndarray) -> float | np.ndarray:
         return implied_vol(self.s0, t, k, self.call_price(t, k))
-    
-    # Функция распределения цены
+
+    # CDF of S_t at level s
     def cdf(self, t: float, s: float) -> float:
         def integrand(u):
             return (cmath.exp(1j*u*log(self.s0/s)) / (1j*u) * self._cf(u, t)).real
         return 0.5 - 1/pi * quad(integrand, 0, inf)[0]
-    
-    # Квантиль распределения цены уровня p
+
+    # quantile function at level p
     def quantile(self, t: float, p: float) -> float:
         return newton(lambda s: self.cdf(t, s) - p, self.s0)
-    
-    # Интерполяция функции распределения цены в момент t по n точкам с квантилями
-    # 1/n, 2/n, ..., (n-1)/n. Функция распределения полагается равной нулю левее квантили 1/4n,
-    # и равной 1 правее квантили 1 - 1/4n.
-    # Возвращается объект, который можно вызывать как функцию.
+
+    # interpolated CDF at time t over n quantile points
+    # CDF is set to 0 left of the 1/(4n) quantile and 1 right of 1 - 1/(4n)
     def cdf_interpolate(self, t: float, n: int = 1000, kind: str = 'linear') -> callable:
         P = np.linspace(0, 1, n+1)
         s_p0 = self.quantile(t, 1/(4*n))
         s_p1 = self.quantile(t, 1 - 1/(4*n))
         S = [s_p0] + [self.quantile(t, p) for p in P[1:-1]] + [s_p1]
-        return interp1d(S, P, fill_value = (0, 1), bounds_error=False, kind=kind)
+        return interp1d(S, P, fill_value=(0, 1), bounds_error=False, kind=kind)
 
-    # Интерполяция квантильной функции в момент t по n точкам
+    # interpolated quantile function at time t over n points
     def quantile_interpolate(self, t: float, n: int = 1000, kind: str = 'linear') -> callable:
         P = np.linspace(0, 1, n+1)
         s_p0 = self.quantile(t, 1/(4*n))
